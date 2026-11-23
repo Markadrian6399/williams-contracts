@@ -1426,7 +1426,7 @@ impl WillContract {
             symbol_short!("checkin"),
         );
 
-        events::check_in(&env, will_id, &caller, next_deadline);
+        events::check_in(&env, will_id, &caller, now, next_deadline);
     }
 
     /// Sets or replaces the delegate address for `will_id`. Only callable
@@ -1576,7 +1576,7 @@ impl WillContract {
                 symbol_short!("checkin"),
             );
 
-            events::check_in(&env, will_id, &caller, next_deadline);
+            events::check_in(&env, will_id, &caller, now, next_deadline);
         }
 
         events::batch_checkin(&env, &caller, &will_ids, count);
@@ -1720,6 +1720,7 @@ impl WillContract {
         );
         will.status = WillStatus::Active;
         will.trigger_time = None;
+        will.grace_extension_days = 0;
         will.last_checkin = now;
         will.trigger_cooldown_until = now + TRIGGER_COOLDOWN_SECONDS;
         will.guardian_vote_weight = 0;
@@ -1908,6 +1909,9 @@ impl WillContract {
         let now = env.ledger().timestamp();
         if now <= grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
+        }
+        if now < freeze_until(&env, will_id) {
+            panic_with_error!(&env, WillError::CountdownFrozen);
         }
 
         record_transition(
@@ -3838,6 +3842,56 @@ impl WillContract {
     /// - [`WillError::NotGuardian`] if `guardian` is not one of the will's guardians.
     /// - [`WillError::AlreadyVoted`] if `guardian` already cast a cancel vote in this cycle.
     /// - [`WillError::GuardianCooldownActive`] if the guardian-list cooldown has not elapsed.
+    /// Casts a guardian vote for a one-time emergency freeze of a Triggered
+    /// will's release countdown (#128). Once consented guardian weight reaches
+    /// `guardian_threshold`, `release_inheritance` is blocked for
+    /// `GUARDIAN_FREEZE_SECONDS`; the freeze then expires automatically so it
+    /// can never lock funds permanently. A will can be frozen only once.
+    pub fn guardian_freeze_countdown(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let will = load_will(&env, will_id);
+        assert_status(&env, &will, WillStatus::Triggered, WillError::WillNotTriggered);
+        let store = env.storage().persistent();
+        let until_key = (symbol_short!("frz_until"), will_id);
+        if store.has(&until_key) {
+            panic_with_error!(&env, WillError::CountdownFrozen);
+        }
+        match will.guardians.iter().find(|g| g.address == guardian) {
+            Some(g) if g.consent == GuardianConsent::Accepted => {}
+            Some(_) => panic_with_error!(&env, WillError::GuardianNotConsented),
+            None => panic_with_error!(&env, WillError::NotGuardian),
+        }
+        let votes_key = (symbol_short!("frz_votes"), will_id);
+        let mut votes: Vec<Address> = store.get(&votes_key).unwrap_or(Vec::new(&env));
+        if votes.contains(&guardian) {
+            panic_with_error!(&env, WillError::AlreadyVoted);
+        }
+        votes.push_back(guardian);
+        let weight: u32 = will
+            .guardians
+            .iter()
+            .filter(|g| g.consent == GuardianConsent::Accepted && votes.contains(&g.address))
+            .map(|g| g.weight)
+            .sum();
+        if weight >= will.guardian_threshold {
+            let until = checked_add_timestamp(
+                &env,
+                env.ledger().timestamp(),
+                GUARDIAN_FREEZE_SECONDS,
+            );
+            store.set(&until_key, &until);
+            store.remove(&votes_key);
+        } else {
+            store.set(&votes_key, &votes);
+        }
+    }
+
+    /// Returns the timestamp until which `release_inheritance` is frozen for
+    /// `will_id`, or 0 if no emergency freeze was ever applied (#128).
+    pub fn get_freeze_until(env: Env, will_id: u64) -> u64 {
+        freeze_until(&env, will_id)
+    }
+
     pub fn guardian_cancel_trigger(env: Env, will_id: u64, guardian: Address) {
         guardian.require_auth();
         let mut will = load_will(&env, will_id);
@@ -3924,6 +3978,7 @@ impl WillContract {
             );
             will.status = WillStatus::Active;
             will.trigger_time = None;
+            will.grace_extension_days = 0;
             will.last_checkin = now;
             will.guardian_vote_weight = 0;
             will.guardian_votes = 0;
@@ -6443,6 +6498,16 @@ fn checked_deadline_as_i64(env: &Env, base: u64, days: u64) -> i64 {
 /// goes through this helper so they can never disagree. The fallback for a
 /// missing `trigger_time` uses the same anchor rather than `0`, which would
 /// otherwise make the grace period appear long expired.
+/// Duration of a guardian emergency countdown freeze (#128): 7 days.
+pub const GUARDIAN_FREEZE_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+fn freeze_until(env: &Env, will_id: u64) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("frz_until"), will_id))
+        .unwrap_or(0)
+}
+
 fn grace_deadline(env: &Env, will: &Will) -> u64 {
     let start = will.trigger_time.unwrap_or_else(|| {
         let period_seconds = checked_days_to_seconds(env, will.checkin_period_days);

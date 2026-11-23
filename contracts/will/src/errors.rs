@@ -371,4 +371,10 @@ pub enum WillError {
     /// will entry that `reveal_and_claim` uses to verify the commitment,
     /// permanently trapping those reserved funds in the contract (#1).
     UnclaimedHashedBeneficiary = 58,
+    /// Raised when a will's schema version is newer than this build supports,
+    /// e.g. after a contract rollback (#129).
+    FutureSchemaVersion = 59,
+    /// Raised when release is attempted during a guardian emergency freeze,
+    /// or a second freeze is requested (#128).
+    CountdownFrozen = 60,
 }

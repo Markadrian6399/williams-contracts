@@ -56,10 +56,18 @@ pub fn will_confirmed(env: &Env, will_id: u64, owner: &Address) {
 }
 
 /// Published when the owner checks in, resetting the check-in deadline.
-pub fn check_in(env: &Env, will_id: u64, owner: &Address, next_deadline: u64) {
+///
+/// Data: `(owner, checked_in_at, next_deadline, seconds_remaining)` so keepers
+/// can schedule trigger jobs without extra RPC queries (#127).
+pub fn check_in(env: &Env, will_id: u64, owner: &Address, checked_in_at: u64, next_deadline: u64) {
     env.events().publish(
         (symbol_short!("checkin"), will_id),
-        (owner.clone(), next_deadline),
+        (
+            owner.clone(),
+            checked_in_at,
+            next_deadline,
+            next_deadline.saturating_sub(checked_in_at),
+        ),
     );
 }
 

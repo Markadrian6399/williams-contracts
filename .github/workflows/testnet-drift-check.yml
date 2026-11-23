@@ -1,0 +1,24 @@
+name: Testnet Deployment Drift Check
+
+# Read-only comparison of the live testnet bytecode against
+# deployments/testnet.json (issue #236). Never deploys or edits the record.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+
+      - name: Compare live wasm hash with recorded hash
+        run: ./scripts/check-testnet-drift.sh

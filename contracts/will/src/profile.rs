@@ -383,3 +383,61 @@ fn profile() {
     report.print();
     report.assert_within_limits();
 }
+
+/// Maximum supported envelopes (#237): a release paying `MAX_BENEFICIARIES`
+/// beneficiaries across `MAX_TOKENS` tokens (`MAX_RELEASE_PAYOUTS`), and a
+/// `batch_check_in` of `MAX_BATCH_CHECK_IN` wills. Asserted against the same
+/// CPU/memory and ledger/event limits as the baseline profile. Native
+/// `cost_estimate` excludes WASM execution, so this is a lower bound; the
+/// compiled-WASM figures come from simulating the built artifact.
+#[test]
+fn profile_max_envelopes() {
+    let mut report = Report::new();
+
+    // release_inheritance at MAX_BENEFICIARIES x MAX_TOKENS
+    {
+        let f = fixture();
+        let mut tokens: Vec<(Address, i128)> = Vec::new(&f.env);
+        for _ in 0..crate::MAX_TOKENS {
+            let t = f
+                .env
+                .register_stellar_asset_contract_v2(f.owner.clone())
+                .address();
+            StellarAssetClient::new(&f.env, &t).mint(&f.owner, &1_000_000);
+            tokens.push_back((t, 1_000_000));
+        }
+        let list = beneficiaries(&f.env, crate::MAX_BENEFICIARIES);
+        let will_id = f.client.create_will(
+            &f.owner,
+            &tokens,
+            &list,
+            &1,
+            &1,
+            &Vec::new(&f.env),
+            &0,
+            &None,
+            &0,
+        );
+        f.advance(2 * DAY + 1);
+        f.client.trigger_will(&will_id);
+        f.advance(2 * DAY + 1);
+        f.client.release_inheritance(&will_id, &None);
+        report.record(&f.env, "release_max_payouts");
+    }
+
+    // batch_check_in at MAX_BATCH_CHECK_IN
+    {
+        let f = fixture();
+        let none = Vec::new(&f.env);
+        let mut ids: Vec<u64> = Vec::new(&f.env);
+        for _ in 0..crate::batch_check_in_limit::MAX_BATCH_CHECK_IN {
+            ids.push_back(f.create(&none).0);
+        }
+        f.advance(DAY);
+        f.client.batch_check_in(&ids, &f.owner);
+        report.record(&f.env, "batch_check_in_max");
+    }
+
+    report.print();
+    report.assert_within_limits();
+}

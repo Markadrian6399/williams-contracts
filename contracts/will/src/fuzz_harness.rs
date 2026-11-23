@@ -971,6 +971,8 @@ pub fn run_merge_wills(input: &MergeWillsInput) -> Outcome {
         .unwrap_or(0);
 
     let expected_combined = balance_a.saturating_add(balance_b);
+    let source_a = scenario.client.get_will(&will_id_a).beneficiaries;
+    let source_b = scenario.client.get_will(&will_id_b).beneficiaries;
 
     // Attempt the merge.
     let result = scenario
@@ -1033,7 +1035,75 @@ pub fn run_merge_wills(input: &MergeWillsInput) -> Outcome {
     // Every beneficiary can still find the surviving will in their index.
     assert_beneficiaries_are_indexed(&scenario.client, &surviving);
 
+    // Independent allocation oracle (#234).
+    check_merged_allocations(input, &source_a, &source_b, &surviving, expected_combined);
+
     Outcome::Accepted(will_id_a)
+}
+
+/// Independent oracle for merged allocations (#234): every merged entry is a
+/// unique address drawn from the union of both sources, every source address
+/// survives, percentage totals stay within 10_000 bps, and fixed amounts never
+/// exceed the combined estate.
+fn check_merged_allocations(
+    input: &MergeWillsInput,
+    source_a: &soroban_sdk::Vec<Beneficiary>,
+    source_b: &soroban_sdk::Vec<Beneficiary>,
+    merged: &Will,
+    combined: i128,
+) {
+    let mut total_bps: u64 = 0;
+    let mut total_fixed: i128 = 0;
+    for (i, b) in merged.beneficiaries.iter().enumerate() {
+        match b.allocation {
+            Allocation::Percentage(bp) => {
+                check(bp > 0, input, "merged will has a zero-bps percentage share");
+                total_bps += bp as u64;
+            }
+            Allocation::FixedAmount(amt) => {
+                check(
+                    amt > 0,
+                    input,
+                    "merged will has a non-positive fixed amount",
+                );
+                total_fixed = total_fixed.saturating_add(amt);
+            }
+        }
+        check(
+            source_a
+                .iter()
+                .chain(source_b.iter())
+                .any(|s| s.address == b.address),
+            input,
+            "merged will contains a beneficiary absent from both sources",
+        );
+        check(
+            merged
+                .beneficiaries
+                .iter()
+                .skip(i + 1)
+                .all(|o| o.address != b.address),
+            input,
+            "merged will repeats a beneficiary address",
+        );
+    }
+    for s in source_a.iter().chain(source_b.iter()) {
+        check(
+            merged.beneficiaries.iter().any(|b| b.address == s.address),
+            input,
+            "a source beneficiary was dropped by the merge",
+        );
+    }
+    check(
+        total_bps <= 10_000,
+        input,
+        "merged percentage allocations exceed 10_000 bps",
+    );
+    check(
+        total_fixed <= combined,
+        input,
+        "merged fixed amounts exceed the combined estate",
+    );
 }
 
 // ---------------------------------------------------------------------------
